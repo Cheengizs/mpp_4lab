@@ -128,6 +128,8 @@ function startPayload(room) {
     type: 'start',
     w: room.size,
     h: room.size,
+    duration: GAME_MS,
+    remaining: Math.max(0, room.endsAt - Date.now()),
     players: room.members.map((m) => ({ id: m.id, name: m.name }))
   };
 }

@@ -19,6 +19,12 @@
   #join { display: flex; gap: .5rem; }
   #join input { padding: .6rem; font-size: 1rem; border-radius: 6px; border: 0; }
   #wins .row { display: flex; justify-content: space-between; }
+  #clock { width: min(700px, 95vw); text-align: center; }
+  #timer { font-size: 2rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  #clock.urgent #timer { color: #ef4444; }
+  #bar { height: 8px; background: #2c303a; border-radius: 4px; overflow: hidden; }
+  #fill { height: 100%; width: 100%; background: #3b82f6; }
+  #clock.urgent #fill { background: #ef4444; }
   #overlay { min-height: 1.5rem; font-weight: 600; text-align: center; }
 </style>
 </head>
@@ -29,10 +35,13 @@
   <input type="text" id="nick" maxlength="16" placeholder="Ваш ник" autocomplete="off">
   <button>Войти</button>
 </form>
+<div id="clock" hidden>
+  <div id="timer">1:30</div>
+  <div id="bar"><div id="fill"></div></div>
+</div>
 <div id="layout" hidden>
   <canvas id="c" width="600" height="600"></canvas>
   <div id="side">
-    <div id="timer"></div>
     <div id="list"></div>
     <button id="start" hidden>Начать игру</button>
     <h4>Победы в комнате</h4>
@@ -49,6 +58,21 @@
   const overlay = document.getElementById('overlay');
   const list = document.getElementById('list');
   const timer = document.getElementById('timer');
+  const clock = document.getElementById('clock');
+  const fill = document.getElementById('fill');
+  let endAt = 0;
+  let duration = 1;
+
+  function updateClock() {
+    if (clock.hidden) return;
+    const left = Math.max(0, endAt - Date.now());
+    const sec = Math.ceil(left / 1000);
+    timer.textContent = `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+    fill.style.width = `${Math.min(100, (left / duration) * 100)}%`;
+    clock.classList.toggle('urgent', sec <= 10);
+  }
+
+  setInterval(updateClock, 100);
   const startBtn = document.getElementById('start');
 
   let ws;
@@ -79,6 +103,7 @@
     ws = new WebSocket(`${proto}://${location.host}/ws?${query}`);
     ws.onclose = (e) => {
       playing = false;
+      clock.hidden = true;
       if (e.code === 4004) overlay.textContent = 'Комната не найдена';
       else if (e.code === 4005) overlay.textContent = 'Игра уже идёт';
       else if (e.code === 4006) overlay.textContent = 'Комната заполнена';
@@ -113,6 +138,10 @@
       canvas.width = canvas.height = cellSize * m.w;
       players = m.players;
       state = null;
+      duration = m.duration;
+      endAt = Date.now() + m.remaining;
+      clock.hidden = false;
+      updateClock();
       overlay.textContent = '';
       startBtn.hidden = true;
     } else if (m.type === 'you') {
@@ -124,7 +153,7 @@
     } else if (m.type === 'aborted') {
       playing = false;
       overlay.textContent = 'Игра прервана из-за ошибки сервера';
-      timer.textContent = '';
+      clock.hidden = true;
     } else if (m.type === 'end') {
       playing = false;
       const winner = m.results[0];
@@ -135,7 +164,7 @@
         d.append(dot(r.color), `${i + 1}. ${r.name} — ${r.percent}%`);
         list.appendChild(d);
       });
-      timer.textContent = '';
+      clock.hidden = true;
     }
     if (!playing && lobby) {
       startBtn.hidden = lobby.host !== myName;
@@ -180,7 +209,7 @@
 
   function renderScores() {
     if (!state) return;
-    timer.textContent = `Осталось: ${Math.ceil(state.remaining / 1000)} с`;
+    endAt = Date.now() + state.remaining;
     const total = grid.w * grid.h;
     list.innerHTML = '';
     [...state.players]
