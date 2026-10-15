@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Захват территории</title>
+<style>
+  body { font-family: system-ui, sans-serif; background: #14161c; color: #eee; margin: 0; padding: 1rem; display: flex; flex-direction: column; align-items: center; gap: .75rem; }
+  #layout { display: flex; gap: 1rem; flex-wrap: wrap; justify-content: center; }
+  canvas { background: #22252e; border-radius: 6px; max-width: 95vw; }
+  #side { width: 240px; }
+  #side div { padding: 2px 0; }
+  .dot { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; }
+  .dead { opacity: .4; text-decoration: line-through; }
+  button { padding: .6rem 1rem; font-size: 1rem; border: 0; border-radius: 6px; background: #3b82f6; color: #fff; cursor: pointer; }
+  button:disabled { background: #555; cursor: default; }
+  a { color: #7cb3ff; }
+  #overlay { min-height: 1.5rem; font-weight: 600; text-align: center; }
+</style>
+</head>
+<body>
+<div>Ссылка на комнату: <a id="link"></a></div>
+<div id="overlay"></div>
+<div id="layout">
+  <canvas id="c" width="600" height="600"></canvas>
+  <div id="side">
+    <div id="timer"></div>
+    <div id="list"></div>
+    <button id="start" hidden>Начать игру</button>
+  </div>
+</div>
+<script>
+  const COLORS = ['#ef4444', '#3b82f6', '#22c55e', '#eab308', '#a855f7', '#f97316', '#06b6d4', '#ec4899', '#84cc16', '#94a3b8'];
+  const roomId = location.pathname.split('/').pop();
+  const link = document.getElementById('link');
+  link.href = link.textContent = location.href;
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const overlay = document.getElementById('overlay');
+  const list = document.getElementById('list');
+  const timer = document.getElementById('timer');
+  const startBtn = document.getElementById('start');
+
+  let ws;
+  let myName = '';
+  let myId = 0;
+  let grid = { w: 50, h: 50 };
+  let players = [];
+  let lobby = null;
+  let state = null;
+  let playing = false;
+  let reconnect = true;
+
+  function colorOf(id) {
+    return COLORS[(id - 1) % COLORS.length];
+  }
+
+  function connect() {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    ws = new WebSocket(`${proto}://${location.host}/ws?room=${encodeURIComponent(roomId)}`);
+    ws.onclose = (e) => {
+      if (e.code === 4004) overlay.textContent = 'Комната не найдена';
+      else if (e.code === 4005) overlay.textContent = 'Игра уже идёт';
+      else if (e.code === 4006) overlay.textContent = 'Комната заполнена';
+      else if (reconnect) {
+        overlay.textContent = 'Соединение потеряно';
+        return;
+      }
+      reconnect = false;
+    };
+    ws.onmessage = (e) => handle(JSON.parse(e.data));
+  }
+
+  function handle(m) {
+    if (m.type === 'name') {
+      myName = m.name;
+    } else if (m.type === 'lobby') {
+      lobby = m;
+      if (!playing) {
+        overlay.textContent = `Ожидание игроков: ${m.players.length}/${m.max}`;
+        renderLobby();
+      }
+    } else if (m.type === 'start') {
+      playing = true;
+      grid = { w: m.w, h: m.h };
+      players = m.players;
+      state = null;
+      overlay.textContent = '';
+      startBtn.hidden = true;
+    } else if (m.type === 'you') {
+      myId = m.id;
+    } else if (m.type === 'state') {
+      state = m;
+      render();
+      renderScores();
+    } else if (m.type === 'end') {
+      playing = false;
+      const winner = m.results[0];
+      overlay.textContent = `Игра окончена. Победитель: ${winner.name} (${winner.percent}%)`;
+      list.innerHTML = '';
+      m.results.forEach((r, i) => {
+        const d = document.createElement('div');
+        d.innerHTML = `<span class="dot" style="background:${colorOf(r.color)}"></span>${i + 1}. ${r.name} — ${r.percent}%`;
+        list.appendChild(d);
+      });
+      timer.textContent = '';
+    }
+    if (!playing && lobby) {
+      startBtn.hidden = lobby.host !== myName;
+      startBtn.disabled = lobby.players.length < lobby.min;
+    }
+  }
+
+  function renderLobby() {
+    list.innerHTML = '';
+    lobby.players.forEach((n) => {
+      const d = document.createElement('div');
+      d.textContent = n + (n === lobby.host ? ' (хост)' : '') + (n === myName ? ' — вы' : '');
+      list.appendChild(d);
+    });
+  }
+
+  function renderScores() {
+    if (!state) return;
+    timer.textContent = `Осталось: ${Math.ceil(state.remaining / 1000)} с`;
+    const total = grid.w * grid.h;
+    list.innerHTML = '';
+    [...state.players]
+      .sort((a, b) => b.score - a.score)
+      .forEach((p) => {
+        const info = players.find((x) => x.id === p.id);
+        const d = document.createElement('div');
+        if (!p.alive) d.className = 'dead';
+        d.innerHTML = `<span class="dot" style="background:${colorOf(p.id)}"></span>${info.name}${p.id === myId ? ' (вы)' : ''} — ${(p.score / total * 100).toFixed(1)}%`;
+        list.appendChild(d);
+      });
+  }
+
+  function render() {
+    const cell = canvas.width / grid.w;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    for (let i = 0; i < state.owner.length; i++) {
+      const o = state.owner.charCodeAt(i) - 48;
+      const t = state.trail.charCodeAt(i) - 48;
+      if (!o && !t) continue;
+      const x = (i % grid.w) * cell;
+      const y = Math.floor(i / grid.w) * cell;
+      if (o) {
+        ctx.fillStyle = colorOf(o);
+        ctx.globalAlpha = 0.55;
+        ctx.fillRect(x, y, cell, cell);
+      }
+      if (t) {
+        ctx.fillStyle = colorOf(t);
+        ctx.globalAlpha = 0.9;
+        ctx.fillRect(x + cell * 0.2, y + cell * 0.2, cell * 0.6, cell * 0.6);
+      }
+    }
+    ctx.globalAlpha = 1;
+    for (const p of state.players) {
+      if (!p.alive) continue;
+      ctx.fillStyle = colorOf(p.id);
+      ctx.fillRect(p.x * cell, p.y * cell, cell, cell);
+      ctx.strokeStyle = p.id === myId ? '#fff' : '#000';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(p.x * cell, p.y * cell, cell, cell);
+    }
+  }
+
+  const KEYS = {
+    ArrowUp: [0, -1], KeyW: [0, -1],
+    ArrowDown: [0, 1], KeyS: [0, 1],
+    ArrowLeft: [-1, 0], KeyA: [-1, 0],
+    ArrowRight: [1, 0], KeyD: [1, 0]
+  };
+
+  function sendDir(dx, dy) {
+    if (playing && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'dir', dx, dy }));
+  }
+
+  document.addEventListener('keydown', (e) => {
+    const d = KEYS[e.code];
+    if (!d) return;
+    e.preventDefault();
+    sendDir(d[0], d[1]);
+  });
+
+  let touch = null;
+  canvas.addEventListener('touchstart', (e) => {
+    touch = [e.touches[0].clientX, e.touches[0].clientY];
+  });
+  canvas.addEventListener('touchend', (e) => {
+    if (!touch) return;
+    const dx = e.changedTouches[0].clientX - touch[0];
+    const dy = e.changedTouches[0].clientY - touch[1];
+    touch = null;
+    if (Math.max(Math.abs(dx), Math.abs(dy)) < 20) return;
+    if (Math.abs(dx) > Math.abs(dy)) sendDir(Math.sign(dx), 0);
+    else sendDir(0, Math.sign(dy));
+  });
+
+  startBtn.onclick = () => ws.send(JSON.stringify({ type: 'start' }));
+
+  connect();
+</script>
+</body>
+</html>

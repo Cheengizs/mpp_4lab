@@ -3,12 +3,27 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { WebSocketServer, WebSocket } = require('ws');
+const { createGame, W, H } = require('./game');
 
 const PORT = process.env.PORT || 3000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
+const TICK_MS = 120;
+const GAME_MS = 90000;
+const MIN_PLAYERS = 2;
+const MAX_LIMIT = 10;
 
-// roomId -> Set<ws>
 const rooms = new Map();
+
+function sendFile(res, name, type) {
+  fs.readFile(path.join(PUBLIC_DIR, name), (err, data) => {
+    if (err) {
+      res.writeHead(500);
+      return res.end('error');
+    }
+    res.writeHead(200, { 'Content-Type': type });
+    res.end(data);
+  });
+}
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');
@@ -18,19 +33,25 @@ const server = http.createServer((req, res) => {
     return res.end('ok');
   }
 
-  // "/" -> create a unique room and redirect to it
-  if (url.pathname === '/') {
-    const id = crypto.randomBytes(6).toString('hex');
+  if (url.pathname === '/') return sendFile(res, 'index.html', 'text/html; charset=utf-8');
+
+  if (url.pathname === '/create') {
+    const n = Math.min(MAX_LIMIT, Math.max(MIN_PLAYERS, parseInt(url.searchParams.get('n'), 10) || 4));
+    const id = crypto.randomBytes(4).toString('hex');
+    rooms.set(id, {
+      id,
+      max: n,
+      members: [],
+      game: null,
+      timer: null,
+      endsAt: 0
+    });
     res.writeHead(302, { Location: `/room/${id}` });
     return res.end();
   }
 
-  // "/room/<id>" -> the chat page
-  if (/^\/room\/[a-zA-Z0-9_-]{1,64}$/.test(url.pathname)) {
-    return fs.createReadStream(path.join(PUBLIC_DIR, 'index.html'))
-      .on('error', () => { res.writeHead(500); res.end('error'); })
-      .once('open', () => res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }))
-      .pipe(res);
+  if (/^\/room\/[a-f0-9]{8}$/.test(url.pathname)) {
+    return sendFile(res, 'room.html', 'text/html; charset=utf-8');
   }
 
   res.writeHead(404, { 'Content-Type': 'text/plain' });
@@ -39,51 +60,149 @@ const server = http.createServer((req, res) => {
 
 const wss = new WebSocketServer({ server, path: '/ws' });
 
-function broadcast(roomId, payload) {
+function send(ws, payload) {
+  if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload));
+}
+
+function broadcast(room, payload) {
   const data = JSON.stringify(payload);
-  for (const client of rooms.get(roomId) || []) {
-    if (client.readyState === WebSocket.OPEN) client.send(data);
+  for (const m of room.members) {
+    if (m.ws.readyState === WebSocket.OPEN) m.ws.send(data);
   }
+}
+
+function lobbyInfo(room) {
+  return {
+    type: 'lobby',
+    max: room.max,
+    min: MIN_PLAYERS,
+    host: room.members.length ? room.members[0].name : null,
+    players: room.members.map((m) => m.name),
+    running: !!room.game
+  };
+}
+
+function finish(room, reason) {
+  clearInterval(room.timer);
+  room.timer = null;
+  const scores = room.game.scores();
+  const total = W * H;
+  const results = room.members
+    .map((m) => ({
+      name: m.name,
+      color: m.id,
+      percent: Math.round((scores[m.id - 1] / total) * 1000) / 10
+    }))
+    .sort((a, b) => b.percent - a.percent);
+  room.game = null;
+  broadcast(room, { type: 'end', reason, results });
+  room.members = room.members.filter((m) => m.ws.readyState === WebSocket.OPEN);
+  room.members.forEach((m) => {
+    m.id = 0;
+  });
+  if (room.members.length === 0) {
+    rooms.delete(room.id);
+    return;
+  }
+  broadcast(room, lobbyInfo(room));
+}
+
+function tick(room) {
+  const game = room.game;
+  game.step();
+  const remaining = Math.max(0, room.endsAt - Date.now());
+  const snap = game.snapshot();
+  snap.type = 'state';
+  snap.remaining = remaining;
+  broadcast(room, snap);
+  if (game.aliveCount() <= 1) return finish(room, 'last');
+  if (remaining === 0) finish(room, 'time');
+}
+
+function startGame(room) {
+  room.members.forEach((m, k) => {
+    m.id = k + 1;
+  });
+  room.game = createGame(room.members.length);
+  room.endsAt = Date.now() + GAME_MS;
+  broadcast(room, {
+    type: 'start',
+    w: W,
+    h: H,
+    players: room.members.map((m) => ({ id: m.id, name: m.name }))
+  });
+  room.members.forEach((m) => send(m.ws, { type: 'you', id: m.id }));
+  room.timer = setInterval(() => tick(room), TICK_MS);
 }
 
 wss.on('connection', (ws, req) => {
   const url = new URL(req.url, 'http://localhost');
-  const roomId = (url.searchParams.get('room') || '').slice(0, 64);
-  if (!/^[a-zA-Z0-9_-]+$/.test(roomId)) return ws.close(1008, 'bad room');
+  const room = rooms.get(url.searchParams.get('room'));
+  if (!room) return ws.close(4004, 'no room');
+  if (room.game) return ws.close(4005, 'in progress');
+  if (room.members.length >= room.max) return ws.close(4006, 'full');
 
-  const name = 'user-' + crypto.randomBytes(2).toString('hex');
   ws.isAlive = true;
-  ws.on('pong', () => { ws.isAlive = true; });
+  ws.on('pong', () => {
+    ws.isAlive = true;
+  });
 
-  if (!rooms.has(roomId)) rooms.set(roomId, new Set());
-  rooms.get(roomId).add(ws);
+  const member = { ws, id: 0, name: '' };
+  let num = 1;
+  while (room.members.some((m) => m.name === `Игрок ${num}`)) num++;
+  member.name = `Игрок ${num}`;
+  room.members.push(member);
 
-  ws.send(JSON.stringify({ type: 'welcome', name }));
-  broadcast(roomId, { type: 'system', text: `${name} joined`, online: rooms.get(roomId).size });
+  broadcast(room, lobbyInfo(room));
+  send(ws, { type: 'name', name: member.name });
+
+  if (room.members.length === room.max) startGame(room);
 
   ws.on('message', (raw) => {
     let msg;
-    try { msg = JSON.parse(raw); } catch { return; }
-    const text = String(msg.text || '').trim().slice(0, 1000);
-    if (!text) return;
-    broadcast(roomId, { type: 'message', name, text, time: Date.now() });
+    try {
+      msg = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    if (msg.type === 'start') {
+      if (!room.game && room.members[0] === member && room.members.length >= MIN_PLAYERS) startGame(room);
+    } else if (msg.type === 'dir' && room.game && member.id) {
+      room.game.setDir(member.id, Number(msg.dx) || 0, Number(msg.dy) || 0);
+    }
   });
 
   ws.on('close', () => {
-    const room = rooms.get(roomId);
-    room.delete(ws);
-    if (room.size === 0) rooms.delete(roomId);
-    else broadcast(roomId, { type: 'system', text: `${name} left`, online: room.size });
+    const idx = room.members.indexOf(member);
+    if (idx === -1) return;
+    if (room.game) {
+      room.game.kill(member.id);
+      return;
+    }
+    room.members.splice(idx, 1);
+    if (room.members.length === 0) {
+      rooms.delete(room.id);
+    } else {
+      broadcast(room, lobbyInfo(room));
+    }
   });
 });
 
-// Keep-alive: hosting proxies drop idle connections, and this prunes dead clients.
 setInterval(() => {
   for (const ws of wss.clients) {
-    if (!ws.isAlive) { ws.terminate(); continue; }
+    if (!ws.isAlive) {
+      ws.terminate();
+      continue;
+    }
     ws.isAlive = false;
     ws.ping();
   }
 }, 30000);
+
+setInterval(() => {
+  for (const room of rooms.values()) {
+    if (!room.game && room.members.length === 0) rooms.delete(room.id);
+  }
+}, 600000);
 
 server.listen(PORT, () => console.log(`Listening on :${PORT}`));
