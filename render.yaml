@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: ws-chat
+    name: capture-all
     runtime: node
     plan: free
     buildCommand: npm install
