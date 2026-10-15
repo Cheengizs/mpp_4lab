@@ -31,9 +31,13 @@
     }
   }
 
-  function kill(p) {
+  let events = [];
+  let lastCapturer = 0;
+
+  function kill(p, killerId = 0, reason = 'dead') {
     if (!p.alive) return;
     p.alive = false;
+    events.push({ victim: p.id, killer: killerId, reason });
     p.trailLen = 0;
     for (let i = 0; i < owner.length; i++) {
       if (trail[i] === p.id) trail[i] = 0;
@@ -84,10 +88,12 @@
         owner[i] = p.id;
       }
     }
-    for (const id of victims) kill(players[id - 1]);
+    lastCapturer = p.id;
+    for (const id of victims) kill(players[id - 1], p.id, 'captured');
   }
 
   function step() {
+    lastCapturer = 0;
     const movers = players.filter((p) => p.alive);
     for (const p of movers) {
       p.dx = p.pdx;
@@ -96,7 +102,7 @@
       p.ty = p.y + p.dy;
     }
 
-    const doomed = new Set();
+    const doomed = new Map();
     for (let a = 0; a < movers.length; a++) {
       for (let b = a + 1; b < movers.length; b++) {
         const p = movers[a];
@@ -104,28 +110,28 @@
         const sameCell = p.tx === q.tx && p.ty === q.ty;
         const swapped = p.tx === q.x && p.ty === q.y && q.tx === p.x && q.ty === p.y;
         if (sameCell || swapped) {
-          doomed.add(p);
-          doomed.add(q);
+          if (!doomed.has(p)) doomed.set(p, q.id);
+          if (!doomed.has(q)) doomed.set(q, p.id);
         }
       }
     }
-    for (const p of doomed) kill(p);
+    for (const [p, otherId] of doomed) kill(p, otherId, 'collision');
 
     for (const p of movers) {
       if (!p.alive) continue;
       const nx = p.tx;
       const ny = p.ty;
       if (nx < 0 || ny < 0 || nx >= W || ny >= H) {
-        kill(p);
+        kill(p, 0, 'wall');
         continue;
       }
       const i = ny * W + nx;
       const t = trail[i];
       if (t) {
         if (t === p.id) {
-          kill(p);
+          kill(p, p.id, 'self');
         } else {
-          kill(players[t - 1]);
+          kill(players[t - 1], p.id, 'trail');
         }
         if (!p.alive) continue;
       }
@@ -141,7 +147,7 @@
 
     const counts = scores();
     for (const p of players) {
-      if (p.alive && counts[p.id - 1] === 0) kill(p);
+      if (p.alive && counts[p.id - 1] === 0) kill(p, lastCapturer, 'lost');
     }
   }
 
@@ -166,9 +172,12 @@
 
   function snapshot() {
     const counts = scores();
+    const emitted = events;
+    events = [];
     return {
       owner: Array.from(owner, (v) => String.fromCharCode(48 + v)).join(''),
       trail: Array.from(trail, (v) => String.fromCharCode(48 + v)).join(''),
+      events: emitted,
       players: players.map((p, k) => ({
         id: p.id,
         x: p.x,
@@ -179,7 +188,7 @@
     };
   }
 
-  return { step, kill: (id) => kill(players[id - 1]), setDir, scores, aliveCount, snapshot };
+  return { step, kill: (id) => kill(players[id - 1], 0, 'left'), setDir, scores, aliveCount, snapshot };
 }
 
 module.exports = { createGame };
