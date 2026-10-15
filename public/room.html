@@ -15,18 +15,28 @@
   button { padding: .6rem 1rem; font-size: 1rem; border: 0; border-radius: 6px; background: #3b82f6; color: #fff; cursor: pointer; }
   button:disabled { background: #555; cursor: default; }
   a { color: #7cb3ff; }
+  [hidden] { display: none !important; }
+  #join { display: flex; gap: .5rem; }
+  #join input { padding: .6rem; font-size: 1rem; border-radius: 6px; border: 0; }
+  #wins .row { display: flex; justify-content: space-between; }
   #overlay { min-height: 1.5rem; font-weight: 600; text-align: center; }
 </style>
 </head>
 <body>
 <div>Ссылка на комнату: <a id="link"></a></div>
 <div id="overlay"></div>
-<div id="layout">
+<form id="join">
+  <input type="text" id="nick" maxlength="16" placeholder="Ваш ник" autocomplete="off">
+  <button>Войти</button>
+</form>
+<div id="layout" hidden>
   <canvas id="c" width="600" height="600"></canvas>
   <div id="side">
     <div id="timer"></div>
     <div id="list"></div>
     <button id="start" hidden>Начать игру</button>
+    <h4>Победы в комнате</h4>
+    <div id="wins"></div>
   </div>
 </div>
 <script>
@@ -55,9 +65,9 @@
     return COLORS[(id - 1) % COLORS.length];
   }
 
-  function connect() {
+  function connect(nick) {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    ws = new WebSocket(`${proto}://${location.host}/ws?room=${encodeURIComponent(roomId)}`);
+    ws = new WebSocket(`${proto}://${location.host}/ws?room=${encodeURIComponent(roomId)}&nick=${encodeURIComponent(nick)}`);
     ws.onclose = (e) => {
       if (e.code === 4004) overlay.textContent = 'Комната не найдена';
       else if (e.code === 4005) overlay.textContent = 'Игра уже идёт';
@@ -74,8 +84,13 @@
   function handle(m) {
     if (m.type === 'name') {
       myName = m.name;
+      if (lobby) {
+        renderWins();
+        if (!playing) renderLobby();
+      }
     } else if (m.type === 'lobby') {
       lobby = m;
+      renderWins();
       if (!playing) {
         overlay.textContent = `Ожидание игроков: ${m.players.length}/${m.max}`;
         renderLobby();
@@ -83,6 +98,8 @@
     } else if (m.type === 'start') {
       playing = true;
       grid = { w: m.w, h: m.h };
+      const cellSize = Math.max(4, Math.floor(700 / m.w));
+      canvas.width = canvas.height = cellSize * m.w;
       players = m.players;
       state = null;
       overlay.textContent = '';
@@ -109,6 +126,25 @@
       startBtn.hidden = lobby.host !== myName;
       startBtn.disabled = lobby.players.length < lobby.min;
     }
+  }
+
+  function renderWins() {
+    const box = document.getElementById('wins');
+    box.innerHTML = '';
+    if (!lobby.wins.length) {
+      box.textContent = 'Пока нет побед';
+      return;
+    }
+    lobby.wins.forEach((w) => {
+      const d = document.createElement('div');
+      d.className = 'row';
+      const a = document.createElement('span');
+      a.textContent = w.name + (w.name === myName ? ' (вы)' : '');
+      const b = document.createElement('span');
+      b.textContent = w.wins;
+      d.append(a, b);
+      box.appendChild(d);
+    });
   }
 
   function renderLobby() {
@@ -201,7 +237,16 @@
 
   startBtn.onclick = () => ws.send(JSON.stringify({ type: 'start' }));
 
-  connect();
+  const nickInput = document.getElementById('nick');
+  nickInput.value = localStorage.getItem('nick') || '';
+  document.getElementById('join').onsubmit = (e) => {
+    e.preventDefault();
+    const nick = nickInput.value.trim();
+    localStorage.setItem('nick', nick);
+    e.target.hidden = true;
+    document.getElementById('layout').hidden = false;
+    connect(nick);
+  };
 </script>
 </body>
 </html>

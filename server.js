@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { WebSocketServer, WebSocket } = require('ws');
-const { createGame, W, H } = require('./game');
+const { createGame } = require('./game');
 
 const PORT = process.env.PORT || 3000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -11,6 +11,9 @@ const TICK_MS = 120;
 const GAME_MS = 90000;
 const MIN_PLAYERS = 2;
 const MAX_LIMIT = 10;
+const ROOM_TTL_MS = 3600000;
+const MIN_SIZE = 20;
+const MAX_SIZE = 150;
 
 const rooms = new Map();
 
@@ -37,14 +40,18 @@ const server = http.createServer((req, res) => {
 
   if (url.pathname === '/create') {
     const n = Math.min(MAX_LIMIT, Math.max(MIN_PLAYERS, parseInt(url.searchParams.get('n'), 10) || 4));
+    const size = Math.min(MAX_SIZE, Math.max(MIN_SIZE, parseInt(url.searchParams.get('size'), 10) || 50));
     const id = crypto.randomBytes(4).toString('hex');
     rooms.set(id, {
       id,
       max: n,
+      size,
       members: [],
       game: null,
       timer: null,
-      endsAt: 0
+      endsAt: 0,
+      wins: new Map(),
+      lastActive: Date.now()
     });
     res.writeHead(302, { Location: `/room/${id}` });
     return res.end();
@@ -78,7 +85,8 @@ function lobbyInfo(room) {
     min: MIN_PLAYERS,
     host: room.members.length ? room.members[0].name : null,
     players: room.members.map((m) => m.name),
-    running: !!room.game
+    running: !!room.game,
+    wins: [...room.wins].map(([name, wins]) => ({ name, wins })).sort((a, b) => b.wins - a.wins)
   };
 }
 
@@ -86,7 +94,7 @@ function finish(room, reason) {
   clearInterval(room.timer);
   room.timer = null;
   const scores = room.game.scores();
-  const total = W * H;
+  const total = room.size * room.size;
   const results = room.members
     .map((m) => ({
       name: m.name,
@@ -95,15 +103,18 @@ function finish(room, reason) {
     }))
     .sort((a, b) => b.percent - a.percent);
   room.game = null;
+  const best = results.length ? results[0].percent : 0;
+  if (best > 0) {
+    for (const r of results) {
+      if (r.percent === best) room.wins.set(r.name, (room.wins.get(r.name) || 0) + 1);
+    }
+  }
   broadcast(room, { type: 'end', reason, results });
   room.members = room.members.filter((m) => m.ws.readyState === WebSocket.OPEN);
   room.members.forEach((m) => {
     m.id = 0;
   });
-  if (room.members.length === 0) {
-    rooms.delete(room.id);
-    return;
-  }
+  room.lastActive = Date.now();
   broadcast(room, lobbyInfo(room));
 }
 
@@ -123,12 +134,12 @@ function startGame(room) {
   room.members.forEach((m, k) => {
     m.id = k + 1;
   });
-  room.game = createGame(room.members.length);
+  room.game = createGame(room.members.length, room.size);
   room.endsAt = Date.now() + GAME_MS;
   broadcast(room, {
     type: 'start',
-    w: W,
-    h: H,
+    w: room.size,
+    h: room.size,
     players: room.members.map((m) => ({ id: m.id, name: m.name }))
   });
   room.members.forEach((m) => send(m.ws, { type: 'you', id: m.id }));
@@ -148,9 +159,15 @@ wss.on('connection', (ws, req) => {
   });
 
   const member = { ws, id: 0, name: '' };
+  let base = (url.searchParams.get('nick') || '').replace(/\s+/g, ' ').trim().slice(0, 16);
+  if (!base) base = 'Игрок';
+  let name = base;
   let num = 1;
-  while (room.members.some((m) => m.name === `Игрок ${num}`)) num++;
-  member.name = `Игрок ${num}`;
+  while (room.members.some((m) => m.name === name)) {
+    num++;
+    name = `${base} (${num})`;
+  }
+  member.name = name;
   room.members.push(member);
 
   broadcast(room, lobbyInfo(room));
@@ -180,11 +197,8 @@ wss.on('connection', (ws, req) => {
       return;
     }
     room.members.splice(idx, 1);
-    if (room.members.length === 0) {
-      rooms.delete(room.id);
-    } else {
-      broadcast(room, lobbyInfo(room));
-    }
+    room.lastActive = Date.now();
+    broadcast(room, lobbyInfo(room));
   });
 });
 
@@ -201,7 +215,7 @@ setInterval(() => {
 
 setInterval(() => {
   for (const room of rooms.values()) {
-    if (!room.game && room.members.length === 0) rooms.delete(room.id);
+    if (!room.game && room.members.length === 0 && Date.now() - room.lastActive > ROOM_TTL_MS) rooms.delete(room.id);
   }
 }, 600000);
 

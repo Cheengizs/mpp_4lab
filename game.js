@@ -1,7 +1,6 @@
-const W = 50;
-const H = 50;
-
-function createGame(count) {
+﻿function createGame(count, size) {
+  const W = size;
+  const H = size;
   const owner = new Uint8Array(W * H);
   const trail = new Uint8Array(W * H);
   const players = [];
@@ -151,4 +150,5 @@ function createGame(count) {
   return { step, kill: (id) => kill(players[id - 1]), setDir, scores, aliveCount, snapshot };
 }
 
-module.exports = { createGame, W, H };
+module.exports = { createGame };
+
