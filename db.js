@@ -22,12 +22,14 @@ async function init() {
       last_active TIMESTAMPTZ NOT NULL DEFAULT now()
     )
   `);
+  await pool.query('DROP TABLE IF EXISTS wins');
   await pool.query(`
-    CREATE TABLE IF NOT EXISTS wins (
+    CREATE TABLE IF NOT EXISTS player_wins (
       room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+      token_hash TEXT NOT NULL,
       name TEXT NOT NULL,
       wins INT NOT NULL DEFAULT 0,
-      PRIMARY KEY (room_id, name)
+      PRIMARY KEY (room_id, token_hash)
     )
   `);
 }
@@ -35,11 +37,11 @@ async function init() {
 async function loadRooms() {
   if (!enabled) return [];
   const rooms = await pool.query('SELECT id, max, size, last_active FROM rooms');
-  const wins = await pool.query('SELECT room_id, name, wins FROM wins');
+  const wins = await pool.query('SELECT room_id, token_hash, name, wins FROM player_wins');
   const byRoom = new Map();
   for (const w of wins.rows) {
     if (!byRoom.has(w.room_id)) byRoom.set(w.room_id, new Map());
-    byRoom.get(w.room_id).set(w.name, w.wins);
+    byRoom.get(w.room_id).set(w.token_hash, { name: w.name, wins: w.wins });
   }
   return rooms.rows.map((r) => ({
     id: r.id,
@@ -66,13 +68,13 @@ function touchRoom(id) {
   pool.query('UPDATE rooms SET last_active = now() WHERE id = $1', [id]).catch(report);
 }
 
-function addWin(roomId, name) {
+function addWin(roomId, tokenHash, name) {
   if (!enabled) return;
   pool
     .query(
-      `INSERT INTO wins (room_id, name, wins) VALUES ($1, $2, 1)
-       ON CONFLICT (room_id, name) DO UPDATE SET wins = wins.wins + 1`,
-      [roomId, name]
+      `INSERT INTO player_wins (room_id, token_hash, name, wins) VALUES ($1, $2, $3, 1)
+       ON CONFLICT (room_id, token_hash) DO UPDATE SET wins = player_wins.wins + 1, name = EXCLUDED.name`,
+      [roomId, tokenHash, name]
     )
     .catch(report);
 }

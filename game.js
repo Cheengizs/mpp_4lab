@@ -18,6 +18,10 @@
       y: cy,
       dx: horizontal ? Math.sign(ddx) : 0,
       dy: horizontal ? 0 : Math.sign(ddy),
+      pdx: horizontal ? Math.sign(ddx) : 0,
+      pdy: horizontal ? 0 : Math.sign(ddy),
+      tx: 0,
+      ty: 0,
       alive: true,
       trailLen: 0
     };
@@ -84,10 +88,33 @@
   }
 
   function step() {
-    for (const p of players) {
+    const movers = players.filter((p) => p.alive);
+    for (const p of movers) {
+      p.dx = p.pdx;
+      p.dy = p.pdy;
+      p.tx = p.x + p.dx;
+      p.ty = p.y + p.dy;
+    }
+
+    const doomed = new Set();
+    for (let a = 0; a < movers.length; a++) {
+      for (let b = a + 1; b < movers.length; b++) {
+        const p = movers[a];
+        const q = movers[b];
+        const sameCell = p.tx === q.tx && p.ty === q.ty;
+        const swapped = p.tx === q.x && p.ty === q.y && q.tx === p.x && q.ty === p.y;
+        if (sameCell || swapped) {
+          doomed.add(p);
+          doomed.add(q);
+        }
+      }
+    }
+    for (const p of doomed) kill(p);
+
+    for (const p of movers) {
       if (!p.alive) continue;
-      const nx = p.x + p.dx;
-      const ny = p.y + p.dy;
+      const nx = p.tx;
+      const ny = p.ty;
       if (nx < 0 || ny < 0 || nx >= W || ny >= H) {
         kill(p);
         continue;
@@ -111,6 +138,11 @@
         p.trailLen++;
       }
     }
+
+    const counts = scores();
+    for (const p of players) {
+      if (p.alive && counts[p.id - 1] === 0) kill(p);
+    }
   }
 
   function setDir(id, dx, dy) {
@@ -118,8 +150,8 @@
     if (!p || !p.alive) return;
     if (Math.abs(dx) + Math.abs(dy) !== 1) return;
     if (dx === -p.dx && dy === -p.dy) return;
-    p.dx = dx;
-    p.dy = dy;
+    p.pdx = dx;
+    p.pdy = dy;
   }
 
   function scores() {

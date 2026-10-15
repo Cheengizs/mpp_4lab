@@ -63,14 +63,27 @@
     return COLORS[(id - 1) % COLORS.length];
   }
 
+  function getToken() {
+    let token = localStorage.getItem('token');
+    if (!/^[a-f0-9]{64}$/.test(token || '')) {
+      const bytes = crypto.getRandomValues(new Uint8Array(32));
+      token = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+      localStorage.setItem('token', token);
+    }
+    return token;
+  }
+
   function connect(nick) {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    ws = new WebSocket(`${proto}://${location.host}/ws?room=${encodeURIComponent(roomId)}&nick=${encodeURIComponent(nick)}`);
+    const query = `room=${encodeURIComponent(roomId)}&nick=${encodeURIComponent(nick)}&token=${getToken()}`;
+    ws = new WebSocket(`${proto}://${location.host}/ws?${query}`);
     ws.onclose = (e) => {
       playing = false;
       if (e.code === 4004) overlay.textContent = 'Комната не найдена';
       else if (e.code === 4005) overlay.textContent = 'Игра уже идёт';
       else if (e.code === 4006) overlay.textContent = 'Комната заполнена';
+      else if (e.code === 4007) overlay.textContent = 'Эта комната открыта в другой вкладке';
+      else if (e.code === 4008) overlay.textContent = 'Ошибка идентификации, обновите страницу';
       else {
         overlay.textContent = 'Соединение потеряно, переподключение…';
         setTimeout(() => connect(nick), 2000);
@@ -108,6 +121,10 @@
       state = m;
       render();
       renderScores();
+    } else if (m.type === 'aborted') {
+      playing = false;
+      overlay.textContent = 'Игра прервана из-за ошибки сервера';
+      timer.textContent = '';
     } else if (m.type === 'end') {
       playing = false;
       const winner = m.results[0];
@@ -115,7 +132,7 @@
       list.innerHTML = '';
       m.results.forEach((r, i) => {
         const d = document.createElement('div');
-        d.innerHTML = `<span class="dot" style="background:${colorOf(r.color)}"></span>${i + 1}. ${r.name} — ${r.percent}%`;
+        d.append(dot(r.color), `${i + 1}. ${r.name} — ${r.percent}%`);
         list.appendChild(d);
       });
       timer.textContent = '';
@@ -124,6 +141,13 @@
       startBtn.hidden = lobby.host !== myName;
       startBtn.disabled = lobby.players.length < lobby.min;
     }
+  }
+
+  function dot(id) {
+    const s = document.createElement('span');
+    s.className = 'dot';
+    s.style.background = colorOf(id);
+    return s;
   }
 
   function renderWins() {
@@ -165,7 +189,7 @@
         const info = players.find((x) => x.id === p.id);
         const d = document.createElement('div');
         if (!p.alive) d.className = 'dead';
-        d.innerHTML = `<span class="dot" style="background:${colorOf(p.id)}"></span>${info.name}${p.id === myId ? ' (вы)' : ''} — ${(p.score / total * 100).toFixed(1)}%`;
+        d.append(dot(p.id), `${info.name}${p.id === myId ? ' (вы)' : ''} — ${(p.score / total * 100).toFixed(1)}%`);
         list.appendChild(d);
       });
   }

@@ -15,8 +15,18 @@ const MAX_LIMIT = 10;
 const ROOM_TTL_MS = 3600000;
 const MIN_SIZE = 20;
 const MAX_SIZE = 150;
+const MAX_MESSAGE_BYTES = 1024;
+const TOKEN_PATTERN = /^[a-f0-9]{32,64}$/;
 
 const rooms = new Map();
+
+process.on('uncaughtException', (err) => {
+  console.error('uncaughtException:', err);
+});
+
+process.on('unhandledRejection', (err) => {
+  console.error('unhandledRejection:', err);
+});
 
 function makeRoom({ id, max, size, wins, lastActive }) {
   return {
@@ -72,7 +82,19 @@ const server = http.createServer((req, res) => {
   res.end('Not found');
 });
 
-const wss = new WebSocketServer({ server, path: '/ws' });
+server.on('error', (err) => {
+  console.error('http server error:', err);
+});
+
+server.on('clientError', (err, socket) => {
+  if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
+});
+
+const wss = new WebSocketServer({ server, path: '/ws', maxPayload: MAX_MESSAGE_BYTES });
+
+wss.on('error', (err) => {
+  console.error('websocket server error:', err);
+});
 
 function send(ws, payload) {
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload));
@@ -85,6 +107,10 @@ function broadcast(room, payload) {
   }
 }
 
+function hashToken(token) {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
 function lobbyInfo(room) {
   return {
     type: 'lobby',
@@ -93,52 +119,105 @@ function lobbyInfo(room) {
     host: room.members.length ? room.members[0].name : null,
     players: room.members.map((m) => m.name),
     running: !!room.game,
-    wins: [...room.wins].map(([name, wins]) => ({ name, wins })).sort((a, b) => b.wins - a.wins)
+    wins: [...room.wins.values()].map((w) => ({ name: w.name, wins: w.wins })).sort((a, b) => b.wins - a.wins)
   };
 }
 
-function finish(room, reason) {
+function startPayload(room) {
+  return {
+    type: 'start',
+    w: room.size,
+    h: room.size,
+    players: room.members.map((m) => ({ id: m.id, name: m.name }))
+  };
+}
+
+function nameTaken(room, name, hash) {
+  const lower = name.toLowerCase();
+  if (room.members.some((m) => m.hash !== hash && m.name.toLowerCase() === lower)) return true;
+  for (const [ownerHash, w] of room.wins) {
+    if (ownerHash !== hash && w.name.toLowerCase() === lower) return true;
+  }
+  return false;
+}
+
+function pickName(room, nick, hash) {
+  let base = String(nick || '').replace(/\s+/g, ' ').trim().slice(0, 16);
+  if (!base) base = 'Игрок';
+  let name = base;
+  let num = 1;
+  while (nameTaken(room, name, hash)) {
+    num++;
+    name = `${base} (${num})`;
+  }
+  return name;
+}
+
+function recordWin(room, member) {
+  const entry = room.wins.get(member.hash) || { name: member.name, wins: 0 };
+  entry.name = member.name;
+  entry.wins++;
+  room.wins.set(member.hash, entry);
+  db.addWin(room.id, member.hash, member.name);
+}
+
+function stopGame(room) {
   clearInterval(room.timer);
   room.timer = null;
-  const scores = room.game.scores();
-  const total = room.size * room.size;
-  const results = room.members
-    .map((m) => ({
-      name: m.name,
-      color: m.id,
-      percent: Math.round((scores[m.id - 1] / total) * 1000) / 10
-    }))
-    .sort((a, b) => b.percent - a.percent);
   room.game = null;
-  const best = results.length ? results[0].percent : 0;
-  if (best > 0) {
-    for (const r of results) {
-      if (r.percent === best) {
-        room.wins.set(r.name, (room.wins.get(r.name) || 0) + 1);
-        db.addWin(room.id, r.name);
-      }
-    }
-  }
-  broadcast(room, { type: 'end', reason, results });
   room.members = room.members.filter((m) => m.ws.readyState === WebSocket.OPEN);
   room.members.forEach((m) => {
     m.id = 0;
   });
   room.lastActive = Date.now();
   db.touchRoom(room.id);
+}
+
+function finish(room, reason) {
+  const scores = room.game.scores();
+  const total = room.size * room.size;
+  const ranked = room.members
+    .map((m) => ({
+      member: m,
+      name: m.name,
+      color: m.id,
+      percent: Math.round((scores[m.id - 1] / total) * 1000) / 10
+    }))
+    .sort((a, b) => b.percent - a.percent);
+  const best = ranked.length ? ranked[0].percent : 0;
+  if (best > 0) {
+    for (const r of ranked) {
+      if (r.percent === best) recordWin(room, r.member);
+    }
+  }
+  const results = ranked.map(({ name, color, percent }) => ({ name, color, percent }));
+  broadcast(room, { type: 'end', reason, results });
+  stopGame(room);
+  if (room.members.length === 0) return;
+  broadcast(room, lobbyInfo(room));
+}
+
+function abort(room, err) {
+  console.error(`game in room ${room.id} aborted:`, err);
+  broadcast(room, { type: 'aborted' });
+  stopGame(room);
   broadcast(room, lobbyInfo(room));
 }
 
 function tick(room) {
-  const game = room.game;
-  game.step();
-  const remaining = Math.max(0, room.endsAt - Date.now());
-  const snap = game.snapshot();
-  snap.type = 'state';
-  snap.remaining = remaining;
-  broadcast(room, snap);
-  if (game.aliveCount() <= 1) return finish(room, 'last');
-  if (remaining === 0) finish(room, 'time');
+  try {
+    const game = room.game;
+    game.step();
+    const remaining = Math.max(0, room.endsAt - Date.now());
+    const snap = game.snapshot();
+    snap.type = 'state';
+    snap.remaining = remaining;
+    broadcast(room, snap);
+    if (game.aliveCount() <= 1) return finish(room, 'last');
+    if (remaining === 0) finish(room, 'time');
+  } catch (err) {
+    abort(room, err);
+  }
 }
 
 function startGame(room) {
@@ -147,52 +226,62 @@ function startGame(room) {
   });
   room.game = createGame(room.members.length, room.size);
   room.endsAt = Date.now() + GAME_MS;
-  broadcast(room, {
-    type: 'start',
-    w: room.size,
-    h: room.size,
-    players: room.members.map((m) => ({ id: m.id, name: m.name }))
-  });
+  broadcast(room, startPayload(room));
   room.members.forEach((m) => send(m.ws, { type: 'you', id: m.id }));
   room.timer = setInterval(() => tick(room), TICK_MS);
 }
 
 wss.on('connection', (ws, req) => {
+  ws.on('error', (err) => {
+    console.error('websocket error:', err.message);
+  });
+
   const url = new URL(req.url, 'http://localhost');
   const room = rooms.get(url.searchParams.get('room'));
   if (!room) return ws.close(4004, 'no room');
-  if (room.game) return ws.close(4005, 'in progress');
-  if (room.members.length >= room.max) return ws.close(4006, 'full');
+
+  const token = url.searchParams.get('token') || '';
+  if (!TOKEN_PATTERN.test(token)) return ws.close(4008, 'bad token');
+  const hash = hashToken(token);
+
+  let member = room.members.find((m) => m.hash === hash);
+  if (member) {
+    const old = member.ws;
+    member.ws = ws;
+    if (old !== ws && (old.readyState === WebSocket.OPEN || old.readyState === WebSocket.CONNECTING)) {
+      old.close(4007, 'replaced');
+    }
+  } else {
+    if (room.game) return ws.close(4005, 'in progress');
+    if (room.members.length >= room.max) return ws.close(4006, 'full');
+    member = { ws, hash, id: 0, name: pickName(room, url.searchParams.get('nick'), hash) };
+    room.members.push(member);
+  }
 
   ws.isAlive = true;
   ws.on('pong', () => {
     ws.isAlive = true;
   });
 
-  const member = { ws, id: 0, name: '' };
-  let base = (url.searchParams.get('nick') || '').replace(/\s+/g, ' ').trim().slice(0, 16);
-  if (!base) base = 'Игрок';
-  let name = base;
-  let num = 1;
-  while (room.members.some((m) => m.name === name)) {
-    num++;
-    name = `${base} (${num})`;
-  }
-  member.name = name;
-  room.members.push(member);
-
-  broadcast(room, lobbyInfo(room));
   send(ws, { type: 'name', name: member.name });
+  broadcast(room, lobbyInfo(room));
 
-  if (room.members.length === room.max) startGame(room);
+  if (room.game) {
+    send(ws, startPayload(room));
+    send(ws, { type: 'you', id: member.id });
+  } else if (room.members.length === room.max) {
+    startGame(room);
+  }
 
   ws.on('message', (raw) => {
+    if (member.ws !== ws) return;
     let msg;
     try {
       msg = JSON.parse(raw);
     } catch {
       return;
     }
+    if (!msg || typeof msg !== 'object') return;
     if (msg.type === 'start') {
       if (!room.game && room.members[0] === member && room.members.length >= MIN_PLAYERS) startGame(room);
     } else if (msg.type === 'dir' && room.game && member.id) {
@@ -201,6 +290,7 @@ wss.on('connection', (ws, req) => {
   });
 
   ws.on('close', () => {
+    if (member.ws !== ws) return;
     const idx = room.members.indexOf(member);
     if (idx === -1) return;
     if (room.game) {
