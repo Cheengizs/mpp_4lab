@@ -4,6 +4,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { WebSocketServer, WebSocket } = require('ws');
 const { createGame } = require('./game');
+const db = require('./db');
 
 const PORT = process.env.PORT || 3000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -16,6 +17,20 @@ const MIN_SIZE = 20;
 const MAX_SIZE = 150;
 
 const rooms = new Map();
+
+function makeRoom({ id, max, size, wins, lastActive }) {
+  return {
+    id,
+    max,
+    size,
+    members: [],
+    game: null,
+    timer: null,
+    endsAt: 0,
+    wins: wins || new Map(),
+    lastActive: lastActive || Date.now()
+  };
+}
 
 function sendFile(res, name, type) {
   fs.readFile(path.join(PUBLIC_DIR, name), (err, data) => {
@@ -42,17 +57,9 @@ const server = http.createServer((req, res) => {
     const n = Math.min(MAX_LIMIT, Math.max(MIN_PLAYERS, parseInt(url.searchParams.get('n'), 10) || 4));
     const size = Math.min(MAX_SIZE, Math.max(MIN_SIZE, parseInt(url.searchParams.get('size'), 10) || 50));
     const id = crypto.randomBytes(4).toString('hex');
-    rooms.set(id, {
-      id,
-      max: n,
-      size,
-      members: [],
-      game: null,
-      timer: null,
-      endsAt: 0,
-      wins: new Map(),
-      lastActive: Date.now()
-    });
+    const room = makeRoom({ id, max: n, size });
+    rooms.set(id, room);
+    db.saveRoom(room);
     res.writeHead(302, { Location: `/room/${id}` });
     return res.end();
   }
@@ -106,7 +113,10 @@ function finish(room, reason) {
   const best = results.length ? results[0].percent : 0;
   if (best > 0) {
     for (const r of results) {
-      if (r.percent === best) room.wins.set(r.name, (room.wins.get(r.name) || 0) + 1);
+      if (r.percent === best) {
+        room.wins.set(r.name, (room.wins.get(r.name) || 0) + 1);
+        db.addWin(room.id, r.name);
+      }
     }
   }
   broadcast(room, { type: 'end', reason, results });
@@ -115,6 +125,7 @@ function finish(room, reason) {
     m.id = 0;
   });
   room.lastActive = Date.now();
+  db.touchRoom(room.id);
   broadcast(room, lobbyInfo(room));
 }
 
@@ -198,6 +209,7 @@ wss.on('connection', (ws, req) => {
     }
     room.members.splice(idx, 1);
     room.lastActive = Date.now();
+    db.touchRoom(room.id);
     broadcast(room, lobbyInfo(room));
   });
 });
@@ -215,8 +227,23 @@ setInterval(() => {
 
 setInterval(() => {
   for (const room of rooms.values()) {
-    if (!room.game && room.members.length === 0 && Date.now() - room.lastActive > ROOM_TTL_MS) rooms.delete(room.id);
+    if (!room.game && room.members.length === 0 && Date.now() - room.lastActive > ROOM_TTL_MS) {
+      rooms.delete(room.id);
+      db.deleteRoom(room.id);
+    }
   }
 }, 600000);
 
-server.listen(PORT, () => console.log(`Listening on :${PORT}`));
+async function start() {
+  try {
+    await db.init();
+    for (const r of await db.loadRooms()) rooms.set(r.id, makeRoom(r));
+    console.log(db.enabled ? `Restored ${rooms.size} rooms from database` : 'No DATABASE_URL, running in memory');
+  } catch (err) {
+    console.error('Database unavailable:', err.message);
+    process.exit(1);
+  }
+  server.listen(PORT, () => console.log(`Listening on :${PORT}`));
+}
+
+start();

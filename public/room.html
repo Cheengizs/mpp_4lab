@@ -59,8 +59,6 @@
   let lobby = null;
   let state = null;
   let playing = false;
-  let reconnect = true;
-
   function colorOf(id) {
     return COLORS[(id - 1) % COLORS.length];
   }
@@ -69,14 +67,14 @@
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     ws = new WebSocket(`${proto}://${location.host}/ws?room=${encodeURIComponent(roomId)}&nick=${encodeURIComponent(nick)}`);
     ws.onclose = (e) => {
+      playing = false;
       if (e.code === 4004) overlay.textContent = 'Комната не найдена';
       else if (e.code === 4005) overlay.textContent = 'Игра уже идёт';
       else if (e.code === 4006) overlay.textContent = 'Комната заполнена';
-      else if (reconnect) {
-        overlay.textContent = 'Соединение потеряно';
-        return;
+      else {
+        overlay.textContent = 'Соединение потеряно, переподключение…';
+        setTimeout(() => connect(nick), 2000);
       }
-      reconnect = false;
     };
     ws.onmessage = (e) => handle(JSON.parse(e.data));
   }
@@ -204,10 +202,10 @@
   }
 
   const KEYS = {
-    ArrowUp: [0, -1], KeyW: [0, -1],
-    ArrowDown: [0, 1], KeyS: [0, 1],
-    ArrowLeft: [-1, 0], KeyA: [-1, 0],
-    ArrowRight: [1, 0], KeyD: [1, 0]
+    ArrowUp: [0, -1],
+    ArrowDown: [0, 1],
+    ArrowLeft: [-1, 0],
+    ArrowRight: [1, 0]
   };
 
   function sendDir(dx, dy) {
@@ -216,23 +214,9 @@
 
   document.addEventListener('keydown', (e) => {
     const d = KEYS[e.code];
-    if (!d) return;
+    if (!d || !playing) return;
     e.preventDefault();
     sendDir(d[0], d[1]);
-  });
-
-  let touch = null;
-  canvas.addEventListener('touchstart', (e) => {
-    touch = [e.touches[0].clientX, e.touches[0].clientY];
-  });
-  canvas.addEventListener('touchend', (e) => {
-    if (!touch) return;
-    const dx = e.changedTouches[0].clientX - touch[0];
-    const dy = e.changedTouches[0].clientY - touch[1];
-    touch = null;
-    if (Math.max(Math.abs(dx), Math.abs(dy)) < 20) return;
-    if (Math.abs(dx) > Math.abs(dy)) sendDir(Math.sign(dx), 0);
-    else sendDir(0, Math.sign(dy));
   });
 
   startBtn.onclick = () => ws.send(JSON.stringify({ type: 'start' }));
