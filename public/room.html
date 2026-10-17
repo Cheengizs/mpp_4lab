@@ -1,339 +1,461 @@
 <!DOCTYPE html>
 <html lang="ru">
+
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Захват территории</title>
-<style>
-  body { font-family: system-ui, sans-serif; background: #14161c; color: #eee; margin: 0; padding: 1rem; display: flex; flex-direction: column; align-items: center; gap: .75rem; }
-  #layout { display: flex; gap: 1rem; flex-wrap: wrap; justify-content: center; }
-  canvas { background: #22252e; border-radius: 6px; max-width: 95vw; }
-  #side { width: 240px; }
-  #side div { padding: 2px 0; }
-  .dot { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; }
-  .dead { opacity: .4; text-decoration: line-through; }
-  button { padding: .6rem 1rem; font-size: 1rem; border: 0; border-radius: 6px; background: #3b82f6; color: #fff; cursor: pointer; }
-  button:disabled { background: #555; cursor: default; }
-  a { color: #7cb3ff; }
-  [hidden] { display: none !important; }
-  #join { display: flex; gap: .5rem; }
-  #join input { padding: .6rem; font-size: 1rem; border-radius: 6px; border: 0; }
-  #wins .row { display: flex; justify-content: space-between; }
-  #field { position: relative; line-height: 0; }
-  #feed { position: absolute; top: 8px; left: 8px; right: 8px; display: flex; flex-direction: column; gap: 4px; align-items: flex-start; pointer-events: none; line-height: 1.3; }
-  .kill { background: rgba(0, 0, 0, .65); padding: 3px 8px; border-radius: 4px; font-size: .9rem; transition: opacity .5s; }
-  .kill.mine { outline: 1px solid #22c55e; }
-  .kill.me { outline: 1px solid #ef4444; }
-  .kill.fade { opacity: 0; }
-  #clock { width: min(700px, 95vw); text-align: center; }
-  #timer { font-size: 2rem; font-weight: 700; font-variant-numeric: tabular-nums; }
-  #clock.urgent #timer { color: #ef4444; }
-  #bar { height: 8px; background: #2c303a; border-radius: 4px; overflow: hidden; }
-  #fill { height: 100%; width: 100%; background: #3b82f6; }
-  #clock.urgent #fill { background: #ef4444; }
-  #overlay { min-height: 1.5rem; font-weight: 600; text-align: center; }
-</style>
-</head>
-<body>
-<div>Ссылка на комнату: <a id="link"></a></div>
-<div id="overlay"></div>
-<form id="join">
-  <input type="text" id="nick" maxlength="16" placeholder="Ваш ник" autocomplete="off">
-  <button>Войти</button>
-</form>
-<div id="clock" hidden>
-  <div id="timer">1:30</div>
-  <div id="bar"><div id="fill"></div></div>
-</div>
-<div id="layout" hidden>
-  <div id="field">
-    <canvas id="c" width="600" height="600"></canvas>
-    <div id="feed"></div>
-  </div>
-  <div id="side">
-    <div id="list"></div>
-    <button id="start" hidden>Начать игру</button>
-    <h4>Победы в комнате</h4>
-    <div id="wins"></div>
-  </div>
-</div>
-<script>
-  const COLORS = ['#ef4444', '#3b82f6', '#22c55e', '#eab308', '#a855f7', '#f97316', '#06b6d4', '#ec4899', '#84cc16', '#94a3b8'];
-  const roomId = location.pathname.split('/').pop();
-  const link = document.getElementById('link');
-  link.href = link.textContent = location.href;
-  const canvas = document.getElementById('c');
-  const ctx = canvas.getContext('2d');
-  const overlay = document.getElementById('overlay');
-  const list = document.getElementById('list');
-  const timer = document.getElementById('timer');
-  const clock = document.getElementById('clock');
-  const fill = document.getElementById('fill');
-  let endAt = 0;
-  let duration = 1;
-
-  function updateClock() {
-    if (clock.hidden) return;
-    const left = Math.max(0, endAt - Date.now());
-    const sec = Math.ceil(left / 1000);
-    timer.textContent = `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
-    fill.style.width = `${Math.min(100, (left / duration) * 100)}%`;
-    clock.classList.toggle('urgent', sec <= 10);
-  }
-
-  setInterval(updateClock, 100);
-  const startBtn = document.getElementById('start');
-
-  let ws;
-  let myName = '';
-  let myId = 0;
-  let grid = { w: 50, h: 50 };
-  let players = [];
-  let lobby = null;
-  let state = null;
-  let playing = false;
-  function colorOf(id) {
-    return COLORS[(id - 1) % COLORS.length];
-  }
-
-  function getToken() {
-    let token = localStorage.getItem('token');
-    if (!/^[a-f0-9]{64}$/.test(token || '')) {
-      const bytes = crypto.getRandomValues(new Uint8Array(32));
-      token = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
-      localStorage.setItem('token', token);
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Захват территории</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      background: #14161c;
+      color: #eee;
+      margin: 0;
+      padding: 1rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: .75rem;
     }
-    return token;
-  }
 
-  function connect(nick) {
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const query = `room=${encodeURIComponent(roomId)}&nick=${encodeURIComponent(nick)}&token=${getToken()}`;
-    ws = new WebSocket(`${proto}://${location.host}/ws?${query}`);
-    ws.onclose = (e) => {
-      playing = false;
-      clock.hidden = true;
-      if (e.code === 4004) overlay.textContent = 'Комната не найдена';
-      else if (e.code === 4005) overlay.textContent = 'Игра уже идёт';
-      else if (e.code === 4006) overlay.textContent = 'Комната заполнена';
-      else if (e.code === 4007) overlay.textContent = 'Эта комната открыта в другой вкладке';
-      else if (e.code === 4008) overlay.textContent = 'Ошибка идентификации, обновите страницу';
-      else {
+    #layout {
+      display: flex;
+      gap: 1rem;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+
+    canvas {
+      background: #22252e;
+      border-radius: 6px;
+      max-width: 95vw;
+    }
+
+    #side {
+      width: 240px;
+    }
+
+    #side div {
+      padding: 2px 0;
+    }
+
+    .dot {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      border-radius: 3px;
+      margin-right: 6px;
+    }
+
+    .dead {
+      opacity: .4;
+      text-decoration: line-through;
+    }
+
+    button {
+      padding: .6rem 1rem;
+      font-size: 1rem;
+      border: 0;
+      border-radius: 6px;
+      background: #3b82f6;
+      color: #fff;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      background: #555;
+      cursor: default;
+    }
+
+    a {
+      color: #7cb3ff;
+    }
+
+    [hidden] {
+      display: none !important;
+    }
+
+    #join {
+      display: flex;
+      gap: .5rem;
+    }
+
+    #join input {
+      padding: .6rem;
+      font-size: 1rem;
+      border-radius: 6px;
+      border: 0;
+    }
+
+    #wins .row {
+      display: flex;
+      justify-content: space-between;
+    }
+
+    #field {
+      position: relative;
+      line-height: 0;
+    }
+
+    #feed {
+      position: absolute;
+      top: 8px;
+      left: 8px;
+      right: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      align-items: flex-start;
+      pointer-events: none;
+      line-height: 1.3;
+    }
+
+    .kill {
+      background: rgba(0, 0, 0, .65);
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-size: .9rem;
+      transition: opacity .5s;
+    }
+
+    .kill.mine {
+      outline: 1px solid #22c55e;
+    }
+
+    .kill.me {
+      outline: 1px solid #ef4444;
+    }
+
+    .kill.fade {
+      opacity: 0;
+    }
+
+    #clock {
+      width: min(700px, 95vw);
+      text-align: center;
+    }
+
+    #timer {
+      font-size: 2rem;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+    }
+
+    #clock.urgent #timer {
+      color: #ef4444;
+    }
+
+    #bar {
+      height: 8px;
+      background: #2c303a;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+
+    #fill {
+      height: 100%;
+      width: 100%;
+      background: #3b82f6;
+    }
+
+    #clock.urgent #fill {
+      background: #ef4444;
+    }
+
+    #overlay {
+      min-height: 1.5rem;
+      font-weight: 600;
+      text-align: center;
+    }
+  </style>
+</head>
+
+<body>
+  <div>Ссылка на комнату: <a id="link"></a></div>
+  <div id="overlay"></div>
+  <form id="join">
+    <input type="text" id="nick" maxlength="16" placeholder="Ваш ник" autocomplete="off">
+    <button>Войти</button>
+  </form>
+  <div id="clock" hidden>
+    <div id="timer">1:30</div>
+    <div id="bar">
+      <div id="fill"></div>
+    </div>
+  </div>
+  <div id="layout" hidden>
+    <div id="field">
+      <canvas id="c" width="600" height="600"></canvas>
+      <div id="feed"></div>
+    </div>
+    <div id="side">
+      <div id="list"></div>
+      <button id="start" hidden>Начать игру</button>
+      <h4>Победы в комнате</h4>
+      <div id="wins"></div>
+    </div>
+  </div>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const COLORS = ['#ef4444', '#3b82f6', '#22c55e', '#eab308', '#a855f7', '#f97316', '#06b6d4', '#ec4899', '#84cc16', '#94a3b8'];
+    const CLOSE_MESSAGES = {
+      4004: 'Комната не найдена',
+      4005: 'Игра уже идёт',
+      4006: 'Комната заполнена',
+      4007: 'Эта комната открыта в другой вкладке',
+      4008: 'Ошибка идентификации, обновите страницу'
+    };
+    const KILL_TEXTS = {
+      trail: (v, k) => `${k} перерезал след игрока ${v}`,
+      captured: (v, k) => `${k} захватил след игрока ${v}`,
+      self: (v) => `${v} врезался в свой след`,
+      wall: (v) => `${v} врезался в границу поля`,
+      collision: (v, k) => `${v} и ${k} столкнулись лоб в лоб`,
+      lost: (v, k, hasKiller) => (hasKiller ? `${k} захватил всю территорию игрока ${v}` : `${v} потерял всю территорию`),
+      left: (v) => `${v} отключился`
+    };
+    const KEYS = {
+      ArrowUp: [0, -1],
+      ArrowDown: [0, 1],
+      ArrowLeft: [-1, 0],
+      ArrowRight: [1, 0]
+    };
+
+    const roomId = location.pathname.split('/').pop();
+    const canvas = $('c');
+    const ctx = canvas.getContext('2d');
+    const [overlay, list, clock, timer, fill, startBtn, feed, wins] =
+      ['overlay', 'list', 'clock', 'timer', 'fill', 'start', 'feed', 'wins'].map($);
+
+    let ws;
+    let myName = '';
+    let myId = 0;
+    let size = 50;
+    let players = [];
+    let lobby = null;
+    let state = null;
+    let playing = false;
+    let endAt = 0;
+    let duration = 1;
+
+    $('link').href = $('link').textContent = location.href;
+
+    const colorOf = (id) => COLORS[(id - 1) % COLORS.length];
+    const nameOf = (id) => players.find((p) => p.id === id)?.name ?? '?';
+
+    function span(text, className) {
+      const s = document.createElement('span');
+      s.textContent = text;
+      if (className) s.className = className;
+      return s;
+    }
+
+    function dot(id) {
+      const s = span('', 'dot');
+      s.style.background = colorOf(id);
+      return s;
+    }
+
+    function row(id, text, className) {
+      const d = document.createElement('div');
+      if (className) d.className = className;
+      d.append(...(id ? [dot(id), text] : [text]));
+      return d;
+    }
+
+    function updateClock() {
+      if (clock.hidden) return;
+      const left = Math.max(0, endAt - Date.now());
+      const sec = Math.ceil(left / 1000);
+      timer.textContent = `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+      fill.style.width = `${Math.min(100, (left / duration) * 100)}%`;
+      clock.classList.toggle('urgent', sec <= 10);
+    }
+
+    function getToken() {
+      let token = localStorage.getItem('token');
+      if (!/^[a-f0-9]{64}$/.test(token || '')) {
+        const bytes = crypto.getRandomValues(new Uint8Array(32));
+        token = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+        localStorage.setItem('token', token);
+      }
+      return token;
+    }
+
+    function connect(nick) {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      const query = `room=${encodeURIComponent(roomId)}&nick=${encodeURIComponent(nick)}&token=${getToken()}`;
+      ws = new WebSocket(`${proto}://${location.host}/ws?${query}`);
+      ws.onmessage = (e) => handle(JSON.parse(e.data));
+      ws.onclose = (e) => {
+        playing = false;
+        clock.hidden = true;
+        if (CLOSE_MESSAGES[e.code]) {
+          overlay.textContent = CLOSE_MESSAGES[e.code];
+          return;
+        }
         overlay.textContent = 'Соединение потеряно, переподключение…';
         setTimeout(() => connect(nick), 2000);
-      }
-    };
-    ws.onmessage = (e) => handle(JSON.parse(e.data));
-  }
+      };
+    }
 
-  function handle(m) {
-    if (m.type === 'name') {
-      myName = m.name;
-      if (lobby) {
+    const handlers = {
+      name(m) {
+        myName = m.name;
+        if (!lobby) return;
         renderWins();
         if (!playing) renderLobby();
-      }
-    } else if (m.type === 'lobby') {
-      lobby = m;
-      renderWins();
-      if (!playing) {
+      },
+      lobby(m) {
+        lobby = m;
+        renderWins();
+        if (playing) return;
         overlay.textContent = `Ожидание игроков: ${m.players.length}/${m.max}`;
         renderLobby();
+      },
+      start(m) {
+        playing = true;
+        size = m.w;
+        canvas.width = canvas.height = Math.max(4, Math.floor(700 / size)) * size;
+        players = m.players;
+        state = null;
+        feed.replaceChildren();
+        duration = m.duration;
+        endAt = Date.now() + m.remaining;
+        clock.hidden = false;
+        updateClock();
+        overlay.textContent = '';
+        startBtn.hidden = true;
+      },
+      you(m) {
+        myId = m.id;
+      },
+      state(m) {
+        state = m;
+        showKills(m.events || []);
+        render();
+        renderScores();
+      },
+      aborted() {
+        playing = false;
+        overlay.textContent = 'Игра прервана из-за ошибки сервера';
+        clock.hidden = true;
+      },
+      end(m) {
+        playing = false;
+        const [winner] = m.results;
+        overlay.textContent = `Игра окончена. Победитель: ${winner.name} (${winner.percent}%)`;
+        list.replaceChildren(...m.results.map((r, i) => row(r.color, `${i + 1}. ${r.name} — ${r.percent}%`)));
+        clock.hidden = true;
       }
-    } else if (m.type === 'start') {
-      playing = true;
-      grid = { w: m.w, h: m.h };
-      const cellSize = Math.max(4, Math.floor(700 / m.w));
-      canvas.width = canvas.height = cellSize * m.w;
-      players = m.players;
-      state = null;
-      document.getElementById('feed').innerHTML = '';
-      duration = m.duration;
-      endAt = Date.now() + m.remaining;
-      clock.hidden = false;
-      updateClock();
-      overlay.textContent = '';
-      startBtn.hidden = true;
-    } else if (m.type === 'you') {
-      myId = m.id;
-    } else if (m.type === 'state') {
-      state = m;
-      showKills(m.events || []);
-      render();
-      renderScores();
-    } else if (m.type === 'aborted') {
-      playing = false;
-      overlay.textContent = 'Игра прервана из-за ошибки сервера';
-      clock.hidden = true;
-    } else if (m.type === 'end') {
-      playing = false;
-      const winner = m.results[0];
-      overlay.textContent = `Игра окончена. Победитель: ${winner.name} (${winner.percent}%)`;
-      list.innerHTML = '';
-      m.results.forEach((r, i) => {
+    };
+
+    function handle(m) {
+      handlers[m.type]?.(m);
+      if (!playing && lobby) {
+        startBtn.hidden = lobby.host !== myName;
+        startBtn.disabled = lobby.players.length < lobby.min;
+      }
+    }
+
+    function killText(e) {
+      const text = KILL_TEXTS[e.reason] || ((v) => `${v} выбыл`);
+      return text(nameOf(e.victim), nameOf(e.killer), e.killer);
+    }
+
+    function showKills(events) {
+      const seen = new Set();
+      for (const e of events) {
+        if (e.reason === 'collision') {
+          const key = [e.victim, e.killer].sort().join('-');
+          if (seen.has(key)) continue;
+          seen.add(key);
+        }
+        const byOther = e.killer && e.reason !== 'self';
+        const mark = e.victim === myId ? ' me' : byOther && e.killer === myId ? ' mine' : '';
+        const item = row(byOther ? e.killer : e.victim, killText(e), `kill${mark}`);
+        feed.append(item);
+        while (feed.children.length > 5) feed.firstChild.remove();
+        setTimeout(() => item.classList.add('fade'), 4500);
+        setTimeout(() => item.remove(), 5000);
+      }
+    }
+
+    function renderWins() {
+      if (!lobby.wins.length) return wins.replaceChildren('Пока нет побед');
+      wins.replaceChildren(...lobby.wins.map((w) => {
         const d = document.createElement('div');
-        d.append(dot(r.color), `${i + 1}. ${r.name} — ${r.percent}%`);
-        list.appendChild(d);
-      });
-      clock.hidden = true;
+        d.className = 'row';
+        d.append(span(w.name + (w.name === myName ? ' (вы)' : '')), span(w.wins));
+        return d;
+      }));
     }
-    if (!playing && lobby) {
-      startBtn.hidden = lobby.host !== myName;
-      startBtn.disabled = lobby.players.length < lobby.min;
+
+    function renderLobby() {
+      list.replaceChildren(...lobby.players.map((n) =>
+        row(0, n + (n === lobby.host ? ' (хост)' : '') + (n === myName ? ' — вы' : ''))));
     }
-  }
 
-  function nameOf(id) {
-    const p = players.find((x) => x.id === id);
-    return p ? p.name : '?';
-  }
+    function renderScores() {
+      endAt = Date.now() + state.remaining;
+      const total = size * size;
+      const ranked = [...state.players].sort((a, b) => b.score - a.score);
+      list.replaceChildren(...ranked.map((p) => {
+        const text = `${nameOf(p.id)}${p.id === myId ? ' (вы)' : ''} — ${(p.score / total * 100).toFixed(1)}%`;
+        return row(p.id, text, p.alive ? '' : 'dead');
+      }));
+    }
 
-  function killText(e) {
-    const victim = nameOf(e.victim);
-    const killer = nameOf(e.killer);
-    if (e.reason === 'trail') return `${killer} перерезал след игрока ${victim}`;
-    if (e.reason === 'captured') return `${killer} захватил след игрока ${victim}`;
-    if (e.reason === 'self') return `${victim} врезался в свой след`;
-    if (e.reason === 'wall') return `${victim} врезался в границу поля`;
-    if (e.reason === 'collision') return `${victim} и ${killer} столкнулись лоб в лоб`;
-    if (e.reason === 'lost') return e.killer ? `${killer} захватил всю территорию игрока ${victim}` : `${victim} потерял всю территорию`;
-    if (e.reason === 'left') return `${victim} отключился`;
-    return `${victim} выбыл`;
-  }
-
-  function showKills(events) {
-    const feed = document.getElementById('feed');
-    const shown = new Set();
-    for (const e of events) {
-      if (e.reason === 'collision') {
-        const key = [e.victim, e.killer].sort().join('-');
-        if (shown.has(key)) continue;
-        shown.add(key);
+    function render() {
+      const cell = canvas.width / size;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      for (let i = 0; i < state.owner.length; i++) {
+        const o = state.owner.charCodeAt(i) - 48;
+        const t = state.trail.charCodeAt(i) - 48;
+        const x = (i % size) * cell;
+        const y = Math.floor(i / size) * cell;
+        if (o) {
+          ctx.fillStyle = colorOf(o);
+          ctx.globalAlpha = 0.55;
+          ctx.fillRect(x, y, cell, cell);
+        }
+        if (t) {
+          ctx.fillStyle = colorOf(t);
+          ctx.globalAlpha = 0.9;
+          ctx.fillRect(x + cell * 0.2, y + cell * 0.2, cell * 0.6, cell * 0.6);
+        }
       }
-      const d = document.createElement('div');
-      d.className = 'kill';
-      if (e.victim === myId) d.classList.add('me');
-      else if (e.killer === myId && e.reason !== 'self') d.classList.add('mine');
-      d.append(dot(e.killer && e.reason !== 'self' ? e.killer : e.victim), killText(e));
-      feed.appendChild(d);
-      while (feed.children.length > 5) feed.firstChild.remove();
-      setTimeout(() => d.classList.add('fade'), 4500);
-      setTimeout(() => d.remove(), 5000);
-    }
-  }
-
-  function dot(id) {
-    const s = document.createElement('span');
-    s.className = 'dot';
-    s.style.background = colorOf(id);
-    return s;
-  }
-
-  function renderWins() {
-    const box = document.getElementById('wins');
-    box.innerHTML = '';
-    if (!lobby.wins.length) {
-      box.textContent = 'Пока нет побед';
-      return;
-    }
-    lobby.wins.forEach((w) => {
-      const d = document.createElement('div');
-      d.className = 'row';
-      const a = document.createElement('span');
-      a.textContent = w.name + (w.name === myName ? ' (вы)' : '');
-      const b = document.createElement('span');
-      b.textContent = w.wins;
-      d.append(a, b);
-      box.appendChild(d);
-    });
-  }
-
-  function renderLobby() {
-    list.innerHTML = '';
-    lobby.players.forEach((n) => {
-      const d = document.createElement('div');
-      d.textContent = n + (n === lobby.host ? ' (хост)' : '') + (n === myName ? ' — вы' : '');
-      list.appendChild(d);
-    });
-  }
-
-  function renderScores() {
-    if (!state) return;
-    endAt = Date.now() + state.remaining;
-    const total = grid.w * grid.h;
-    list.innerHTML = '';
-    [...state.players]
-      .sort((a, b) => b.score - a.score)
-      .forEach((p) => {
-        const info = players.find((x) => x.id === p.id);
-        const d = document.createElement('div');
-        if (!p.alive) d.className = 'dead';
-        d.append(dot(p.id), `${info.name}${p.id === myId ? ' (вы)' : ''} — ${(p.score / total * 100).toFixed(1)}%`);
-        list.appendChild(d);
-      });
-  }
-
-  function render() {
-    const cell = canvas.width / grid.w;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    for (let i = 0; i < state.owner.length; i++) {
-      const o = state.owner.charCodeAt(i) - 48;
-      const t = state.trail.charCodeAt(i) - 48;
-      if (!o && !t) continue;
-      const x = (i % grid.w) * cell;
-      const y = Math.floor(i / grid.w) * cell;
-      if (o) {
-        ctx.fillStyle = colorOf(o);
-        ctx.globalAlpha = 0.55;
-        ctx.fillRect(x, y, cell, cell);
-      }
-      if (t) {
-        ctx.fillStyle = colorOf(t);
-        ctx.globalAlpha = 0.9;
-        ctx.fillRect(x + cell * 0.2, y + cell * 0.2, cell * 0.6, cell * 0.6);
-      }
-    }
-    ctx.globalAlpha = 1;
-    for (const p of state.players) {
-      if (!p.alive) continue;
-      ctx.fillStyle = colorOf(p.id);
-      ctx.fillRect(p.x * cell, p.y * cell, cell, cell);
-      ctx.strokeStyle = p.id === myId ? '#fff' : '#000';
+      ctx.globalAlpha = 1;
       ctx.lineWidth = 2;
-      ctx.strokeRect(p.x * cell, p.y * cell, cell, cell);
+      for (const p of state.players.filter((q) => q.alive)) {
+        ctx.fillStyle = colorOf(p.id);
+        ctx.fillRect(p.x * cell, p.y * cell, cell, cell);
+        ctx.strokeStyle = p.id === myId ? '#fff' : '#000';
+        ctx.strokeRect(p.x * cell, p.y * cell, cell, cell);
+      }
     }
-  }
 
-  const KEYS = {
-    ArrowUp: [0, -1],
-    ArrowDown: [0, 1],
-    ArrowLeft: [-1, 0],
-    ArrowRight: [1, 0]
-  };
+    document.addEventListener('keydown', (e) => {
+      const dir = KEYS[e.code];
+      if (!dir || !playing) return;
+      e.preventDefault();
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'dir', dx: dir[0], dy: dir[1] }));
+    });
 
-  function sendDir(dx, dy) {
-    if (playing && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'dir', dx, dy }));
-  }
+    startBtn.onclick = () => ws.send(JSON.stringify({ type: 'start' }));
+    setInterval(updateClock, 100);
 
-  document.addEventListener('keydown', (e) => {
-    const d = KEYS[e.code];
-    if (!d || !playing) return;
-    e.preventDefault();
-    sendDir(d[0], d[1]);
-  });
-
-  startBtn.onclick = () => ws.send(JSON.stringify({ type: 'start' }));
-
-  const nickInput = document.getElementById('nick');
-  nickInput.value = localStorage.getItem('nick') || '';
-  document.getElementById('join').onsubmit = (e) => {
-    e.preventDefault();
-    const nick = nickInput.value.trim();
-    localStorage.setItem('nick', nick);
-    e.target.hidden = true;
-    document.getElementById('layout').hidden = false;
-    connect(nick);
-  };
-</script>
+    const nickInput = $('nick');
+    nickInput.value = localStorage.getItem('nick') || '';
+    $('join').onsubmit = (e) => {
+      e.preventDefault();
+      const nick = nickInput.value.trim();
+      localStorage.setItem('nick', nick);
+      e.target.hidden = true;
+      $('layout').hidden = false;
+      connect(nick);
+    };
+  </script>
 </body>
+
 </html>

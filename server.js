@@ -20,13 +20,9 @@ const TOKEN_PATTERN = /^[a-f0-9]{32,64}$/;
 
 const rooms = new Map();
 
-process.on('uncaughtException', (err) => {
-  console.error('uncaughtException:', err);
-});
-
-process.on('unhandledRejection', (err) => {
-  console.error('unhandledRejection:', err);
-});
+for (const event of ['uncaughtException', 'unhandledRejection']) {
+  process.on(event, (err) => console.error(`${event}:`, err));
+}
 
 function makeRoom({ id, max, size, wins, lastActive }) {
   return {
@@ -40,6 +36,11 @@ function makeRoom({ id, max, size, wins, lastActive }) {
     wins: wins || new Map(),
     lastActive: lastActive || Date.now()
   };
+}
+
+function touch(room) {
+  room.lastActive = Date.now();
+  db.touchRoom(room.id);
 }
 
 function sendFile(res, name, type) {
@@ -168,11 +169,8 @@ function stopGame(room) {
   room.timer = null;
   room.game = null;
   room.members = room.members.filter((m) => m.ws.readyState === WebSocket.OPEN);
-  room.members.forEach((m) => {
-    m.id = 0;
-  });
-  room.lastActive = Date.now();
-  db.touchRoom(room.id);
+  for (const m of room.members) m.id = 0;
+  touch(room);
 }
 
 function finish(room, reason) {
@@ -188,14 +186,11 @@ function finish(room, reason) {
     .sort((a, b) => b.percent - a.percent);
   const best = ranked.length ? ranked[0].percent : 0;
   if (best > 0) {
-    for (const r of ranked) {
-      if (r.percent === best) recordWin(room, r.member);
-    }
+    for (const r of ranked.filter((x) => x.percent === best)) recordWin(room, r.member);
   }
   const results = ranked.map(({ name, color, percent }) => ({ name, color, percent }));
   broadcast(room, { type: 'end', reason, results });
   stopGame(room);
-  if (room.members.length === 0) return;
   broadcast(room, lobbyInfo(room));
 }
 
@@ -250,9 +245,7 @@ wss.on('connection', (ws, req) => {
   if (member) {
     const old = member.ws;
     member.ws = ws;
-    if (old !== ws && (old.readyState === WebSocket.OPEN || old.readyState === WebSocket.CONNECTING)) {
-      old.close(4007, 'replaced');
-    }
+    old.close(4007, 'replaced');
   } else {
     if (room.game) return ws.close(4005, 'in progress');
     if (room.members.length >= room.max) return ws.close(4006, 'full');
@@ -300,8 +293,7 @@ wss.on('connection', (ws, req) => {
       return;
     }
     room.members.splice(idx, 1);
-    room.lastActive = Date.now();
-    db.touchRoom(room.id);
+    touch(room);
     broadcast(room, lobbyInfo(room));
   });
 });

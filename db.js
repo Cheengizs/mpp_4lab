@@ -8,8 +8,8 @@ const pool = enabled
     })
   : null;
 
-function report(err) {
-  console.error('db error:', err.message);
+function run(sql, params) {
+  if (enabled) pool.query(sql, params).catch((err) => console.error('db error:', err.message));
 }
 
 async function init() {
@@ -38,50 +38,33 @@ async function loadRooms() {
   if (!enabled) return [];
   const rooms = await pool.query('SELECT id, max, size, last_active FROM rooms');
   const wins = await pool.query('SELECT room_id, token_hash, name, wins FROM player_wins');
-  const byRoom = new Map();
-  for (const w of wins.rows) {
-    if (!byRoom.has(w.room_id)) byRoom.set(w.room_id, new Map());
-    byRoom.get(w.room_id).set(w.token_hash, { name: w.name, wins: w.wins });
-  }
+  const byRoom = new Map(rooms.rows.map((r) => [r.id, new Map()]));
+  for (const w of wins.rows) byRoom.get(w.room_id)?.set(w.token_hash, { name: w.name, wins: w.wins });
   return rooms.rows.map((r) => ({
     id: r.id,
     max: r.max,
     size: r.size,
     lastActive: r.last_active.getTime(),
-    wins: byRoom.get(r.id) || new Map()
+    wins: byRoom.get(r.id)
   }));
 }
 
-function saveRoom(room) {
-  if (!enabled) return;
-  pool
-    .query('INSERT INTO rooms (id, max, size, last_active) VALUES ($1, $2, $3, now()) ON CONFLICT (id) DO NOTHING', [
-      room.id,
-      room.max,
-      room.size
-    ])
-    .catch(report);
-}
+const saveRoom = (room) =>
+  run('INSERT INTO rooms (id, max, size) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING', [
+    room.id,
+    room.max,
+    room.size
+  ]);
 
-function touchRoom(id) {
-  if (!enabled) return;
-  pool.query('UPDATE rooms SET last_active = now() WHERE id = $1', [id]).catch(report);
-}
+const touchRoom = (id) => run('UPDATE rooms SET last_active = now() WHERE id = $1', [id]);
 
-function addWin(roomId, tokenHash, name) {
-  if (!enabled) return;
-  pool
-    .query(
-      `INSERT INTO player_wins (room_id, token_hash, name, wins) VALUES ($1, $2, $3, 1)
-       ON CONFLICT (room_id, token_hash) DO UPDATE SET wins = player_wins.wins + 1, name = EXCLUDED.name`,
-      [roomId, tokenHash, name]
-    )
-    .catch(report);
-}
+const deleteRoom = (id) => run('DELETE FROM rooms WHERE id = $1', [id]);
 
-function deleteRoom(id) {
-  if (!enabled) return;
-  pool.query('DELETE FROM rooms WHERE id = $1', [id]).catch(report);
-}
+const addWin = (roomId, tokenHash, name) =>
+  run(
+    `INSERT INTO player_wins (room_id, token_hash, name, wins) VALUES ($1, $2, $3, 1)
+     ON CONFLICT (room_id, token_hash) DO UPDATE SET wins = player_wins.wins + 1, name = EXCLUDED.name`,
+    [roomId, tokenHash, name]
+  );
 
 module.exports = { enabled, init, loadRooms, saveRoom, touchRoom, addWin, deleteRoom };
